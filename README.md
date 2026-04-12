@@ -2,8 +2,11 @@
 
 [![Update Calendar](https://github.com/backmind/anait-games-calendar/actions/workflows/update-calendar.yml/badge.svg)](https://github.com/backmind/anait-games-calendar/actions/workflows/update-calendar.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![ICS](https://img.shields.io/badge/Calendario-.ics-blue)](https://backmind.github.io/anait-games-calendar/anait_lanzamientos.ics)
 
 Calendario iCal (`.ics`) suscribible con los **lanzamientos de videojuegos** publicados semanalmente en [AnaitGames](https://www.anaitgames.com/tag/lanzamientos).
+
+**Enlace directo al calendario:** https://backmind.github.io/anait-games-calendar/anait_lanzamientos.ics
 
 ## ¿Por qué?
 
@@ -11,41 +14,69 @@ Calendario iCal (`.ics`) suscribible con los **lanzamientos de videojuegos** pub
 
 Este proyecto suple esa carencia: convierte los artículos editoriales semanales en un calendario estándar iCal al que cualquiera puede suscribirse desde Google Calendar, Apple Calendar, Thunderbird u otra aplicación compatible.
 
-## Suscribirse
+## ¿Qué contiene el calendario?
 
-**Suscripción directa** (abre tu app de calendario):
+El script parsea cada artículo semanal de lanzamientos de AnaitGames y crea **un evento por juego** con la siguiente información:
 
-```
-webcal://backmind.github.io/anait-games-calendar/anait_lanzamientos.ics
-```
+- **Nombre del juego** como título del evento. Los juegos que AnaitGames destaca editorialmente llevan el prefijo 🎮 para distinguirlos del resto.
+- **Fecha de lanzamiento** como evento de día completo.
+- **Descripción** con los metadatos del juego: desarrolladora, distribuidora, plataformas disponibles y enlace a Steam cuando existe.
+- **Comentario editorial** — los juegos destacados incluyen además el breve comentario del redactor sobre el juego.
+- **Enlace al artículo fuente** — cada evento incluye la URL directa al artículo semanal de AnaitGames del que se extrajo la información, para que puedas leer la cobertura completa.
 
-**URL HTTPS** (para añadir manualmente como "suscripción por URL"):
+## Suscribirse al calendario
+
+### Google Calendar
+
+1. Abre [Google Calendar](https://calendar.google.com).
+2. En la barra lateral izquierda, junto a **Otros calendarios**, pulsa **+** → **Desde URL**.
+3. Pega la siguiente URL y pulsa **Añadir calendario**:
 
 ```
 https://backmind.github.io/anait-games-calendar/anait_lanzamientos.ics
 ```
 
-### Google Calendar
+Google Calendar actualizará la suscripción automáticamente cada varias horas. Más detalles en la [ayuda de Google Calendar](https://support.google.com/calendar/answer/37100).
 
-1. Abre [Google Calendar](https://calendar.google.com)
-2. Otros calendarios → **+** → **Desde URL**
-3. Pega la URL HTTPS y pulsa **Añadir calendario**
+### Apple Calendar (macOS / iOS)
 
-### Apple Calendar
+**En Mac:**
+1. Abre Calendario → Archivo → **Nueva suscripción de calendario…**
+2. Pega la URL del calendario y pulsa **Suscribir**.
 
-1. Archivo → **Nueva suscripción de calendario…**
-2. Pega la URL HTTPS
+**En iPhone/iPad:**
+1. Abre Ajustes → Calendario → Cuentas → **Añadir cuenta** → **Otra** → **Añadir calendario suscrito**.
+2. Pega la URL del calendario.
+
+### Thunderbird
+
+1. Abre Thunderbird → pestaña Calendario → clic derecho en la lista de calendarios → **Nuevo calendario…**
+2. Selecciona **En la red** → pega la URL → **Suscribir**.
+
+### Otros clientes
+
+Cualquier aplicación de calendario compatible con iCal puede suscribirse usando esta URL:
+
+```
+https://backmind.github.io/anait-games-calendar/anait_lanzamientos.ics
+```
+
+O mediante protocolo webcal (abre directamente la app de calendario):
+
+```
+webcal://backmind.github.io/anait-games-calendar/anait_lanzamientos.ics
+```
 
 ## ¿Cómo funciona?
 
-Cada lunes a las 10:00 UTC, un workflow de GitHub Actions:
+Cada día a las 10:00 UTC (12:00 CET), un workflow de GitHub Actions:
 
-1. Consulta la [API REST de WordPress](https://www.anaitgames.com/wp-json/wp/v2/posts?tags=6806) para detectar artículos nuevos en el tag `#lanzamientos`
-2. Parsea el contenido HTML de cada artículo para extraer nombres, fechas, plataformas y desarrolladoras
-3. Genera eventos iCal de día completo y los fusiona con el calendario existente
-4. Commitea el `.ics` actualizado, que GitHub Pages sirve como fichero estático
+1. Consulta la [API REST de WordPress](https://www.anaitgames.com/wp-json/wp/v2/posts?tags=6806) para detectar artículos nuevos en el tag `#lanzamientos`.
+2. Parsea el contenido HTML de cada artículo nuevo para extraer nombres de juegos, fechas de lanzamiento, plataformas, desarrolladoras y comentarios editoriales.
+3. Genera un evento iCal de día completo por cada juego y lo fusiona con el calendario existente, descartando duplicados por UID.
+4. Commitea el `.ics` actualizado, que [GitHub Pages](https://backmind.github.io/anait-games-calendar/) sirve como fichero estático.
 
-El parsing es 100% programático — no intervienen LLMs ni servicios externos más allá de la propia web de AnaitGames.
+El parsing es 100% programático — no intervienen LLMs ni servicios externos más allá de la propia web de AnaitGames. Si no hay artículos nuevos, la ejecución termina sin modificar nada.
 
 ## Desarrollo local
 

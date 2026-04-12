@@ -2,8 +2,8 @@ name: Update Calendar
 
 on:
   schedule:
-    # Every Monday at 10:00 UTC (12:00 CET)
-    - cron: '0 10 * * 1'
+    # Every day at 10:00 UTC (12:00 CET)
+    - cron: '0 10 * * *'
   workflow_dispatch:
 
 permissions:
