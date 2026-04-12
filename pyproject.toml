@@ -1,0 +1,13 @@
+[project]
+name = "anait-games-calendar"
+version = "1.0.0"
+description = "iCal calendar of video game launches from AnaitGames"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "requests>=2.31",
+    "icalendar>=6.0",
+]
+
