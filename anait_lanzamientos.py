@@ -38,6 +38,12 @@ HEADERS = {
     "Accept-Language": "es",
 }
 
+API_PER_PAGE = 10
+API_TIMEOUT_SECONDS = 20
+UID_HASH_LENGTH = 16
+MAX_H2_TITLE_LENGTH = 120
+MIN_COMMENTARY_LENGTH = 30
+
 MESES = {
     "enero": 1, "febrero": 2, "marzo": 3, "abril": 4,
     "mayo": 5, "junio": 6, "julio": 7, "agosto": 8,
@@ -61,14 +67,17 @@ class GameLaunch:
     @property
     def uid(self) -> str:
         raw = f"{self.name}:{self.launch_date.isoformat()}"
-        return hashlib.sha1(raw.encode()).hexdigest()[:16] + "@anait-lanzamientos"
+        return hashlib.sha1(raw.encode()).hexdigest()[:UID_HASH_LENGTH] + "@anait-lanzamientos"
 
 # ── State management ────────────────────────────────────────────────────
 
 def load_state(path: str) -> dict:
     if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"[warn] Corrupt state file {path!r}, starting fresh: {e}", file=sys.stderr)
     return {"processed_ids": [], "last_run": None}
 
 
@@ -81,8 +90,11 @@ def save_state(path: str, state: dict):
 
 def load_existing_calendar(path: str) -> Calendar:
     if os.path.exists(path):
-        with open(path, "rb") as f:
-            return Calendar.from_ical(f.read())
+        try:
+            with open(path, "rb") as f:
+                return Calendar.from_ical(f.read())
+        except ValueError as e:
+            print(f"[warn] Corrupt calendar file {path!r}, recreating: {e}", file=sys.stderr)
     cal = Calendar()
     cal.add("prodid", "-//AnaitGames Lanzamientos//ES")
     cal.add("version", "2.0")
@@ -166,14 +178,21 @@ def parse_spanish_date(day_str: str, month_str: str, year: int) -> Optional[date
         return None
 
 
+def _adjust_year_crossing(d: date, year: int, article_month: int) -> date:
+    """If an article from Nov/Dec references a Jan/Feb date, bump the year."""
+    if article_month >= 11 and d.month <= 2:
+        return d.replace(year=year + 1)
+    return d
+
+
 def extract_date_from_text(
     text: str, year: int, article_month: int = 0
 ) -> Optional[date]:
     m = _DATE_RE.search(text)
     if m:
         d = parse_spanish_date(m.group(1), m.group(2), year)
-        if d and article_month >= 11 and d.month <= 2:
-            d = d.replace(year=year + 1)
+        if d:
+            d = _adjust_year_crossing(d, year, article_month)
         return d
     return None
 
@@ -188,37 +207,118 @@ def fetch_articles_from_api(max_pages: int = 1) -> list[dict]:
     for page_num in range(1, max_pages + 1):
         params = {
             "tags": TAG_LANZAMIENTOS_ID,
-            "per_page": 10,
+            "per_page": API_PER_PAGE,
             "orderby": "date",
             "order": "desc",
             "page": page_num,
         }
         try:
             r = requests.get(
-                API_POSTS_URL, params=params, headers=HEADERS, timeout=20
+                API_POSTS_URL, params=params, headers=HEADERS, timeout=API_TIMEOUT_SECONDS
             )
             if r.status_code == 400:
                 break
             r.raise_for_status()
-        except Exception as e:
+        except requests.RequestException as e:
             print(f"[warn] API page {page_num}: {e}", file=sys.stderr)
             break
 
-        posts = r.json()
+        try:
+            posts = r.json()
+        except ValueError:
+            print(f"[warn] API page {page_num}: invalid JSON response", file=sys.stderr)
+            break
         if not posts:
             break
 
         for post in posts:
-            articles.append({
-                "id": post["id"],
-                "date": post["date"],
-                "title": post["title"]["rendered"],
-                "link": post["link"],
-                "content_html": post["content"]["rendered"],
-            })
+            try:
+                articles.append({
+                    "id": post["id"],
+                    "date": post["date"],
+                    "title": post["title"]["rendered"],
+                    "link": post["link"],
+                    "content_html": post["content"]["rendered"],
+                })
+            except (KeyError, TypeError) as e:
+                print(f"[warn] Skipping malformed post: {e}", file=sys.stderr)
     return articles
 
 # ── Article parser ──────────────────────────────────────────────────────
+
+def _parse_metadata_block(
+    block_text: str, year: int, article_month: int
+) -> dict:
+    """Extract structured metadata (date, developer, platforms, etc.) from a text block."""
+    launch_date = None
+    developer = ""
+    publisher = ""
+    platforms = ""
+    commentary_lines: list[str] = []
+
+    for line in block_text.split("\n"):
+        line_s = line.strip()
+        if not line_s:
+            continue
+        low = line_s.lower()
+
+        if low.startswith("desarrolla y publica:"):
+            developer = line_s.split(":", 1)[1].strip()
+            publisher = developer
+        elif low.startswith("desarrolla:"):
+            developer = line_s.split(":", 1)[1].strip()
+        elif low.startswith("publica:") or low.startswith("edita:"):
+            publisher = line_s.split(":", 1)[1].strip()
+        elif low.startswith("lanzamiento:"):
+            parts = line_s.split("/")
+            launch_date = extract_date_from_text(
+                parts[0], year, article_month
+            )
+            for part in parts[1:]:
+                ps = part.strip()
+                ps_low = ps.lower()
+                if not platforms and (
+                    "también" in ps_low
+                    or any(
+                        p in ps_low
+                        for p in ["pc", "ps4", "ps5", "xbox", "switch"]
+                    )
+                ):
+                    platforms = re.sub(
+                        r"^también\s+(se publica|disponible)\s+en:?\s*",
+                        "",
+                        ps,
+                        flags=re.IGNORECASE,
+                    )
+        elif low.startswith("disponible en:"):
+            raw_plat = line_s.split(":", 1)[1].strip()
+            raw_plat = re.sub(r"\s*\(\s*$", "", raw_plat)
+            raw_plat = re.sub(
+                r"\s*\(?ver en [^)]*\)?\s*$", "", raw_plat, flags=re.IGNORECASE
+            )
+            platforms = raw_plat
+        else:
+            if len(line_s) > MIN_COMMENTARY_LENGTH:
+                commentary_lines.append(line_s)
+
+    return {
+        "launch_date": launch_date,
+        "developer": developer,
+        "publisher": publisher,
+        "platforms": platforms,
+        "commentary": "\n".join(commentary_lines),
+    }
+
+
+def _find_steam_url(elements: list[Tag]) -> str:
+    """Find the first Steam store link in a list of HTML elements."""
+    for el in elements:
+        for a in el.find_all("a") if hasattr(el, "find_all") else []:
+            href = a.get("href", "")
+            if "store.steampowered.com" in href:
+                return href
+    return ""
+
 
 def parse_featured_games(
     soup: BeautifulSoup, year: int, article_month: int, source_url: str
@@ -228,7 +328,7 @@ def parse_featured_games(
 
     for h2 in soup.find_all("h2"):
         name = h2.get_text(strip=True)
-        if not name or len(name) > 120:
+        if not name or len(name) > MAX_H2_TITLE_LENGTH:
             continue
 
         # Collect text between this h2 and the next h2/hr
@@ -251,71 +351,9 @@ def parse_featured_games(
         if "lanzamiento:" not in block_text.lower():
             continue
 
-        launch_date = None
-        developer = ""
-        publisher = ""
-        platforms = ""
-        steam_url = ""
-        commentary_lines: list[str] = []
+        meta = _parse_metadata_block(block_text, year, article_month)
 
-        for line in block_text.split("\n"):
-            line_s = line.strip()
-            if not line_s:
-                continue
-            low = line_s.lower()
-
-            if low.startswith("desarrolla y publica:"):
-                developer = line_s.split(":", 1)[1].strip()
-                publisher = developer
-            elif low.startswith("desarrolla:"):
-                developer = line_s.split(":", 1)[1].strip()
-            elif low.startswith("publica:") or low.startswith("edita:"):
-                publisher = line_s.split(":", 1)[1].strip()
-            elif low.startswith("lanzamiento:"):
-                # Handle cases like "Lanzamiento: 27 de mayo/ Ver en Steam"
-                parts = line_s.split("/")
-                launch_date = extract_date_from_text(
-                    parts[0], year, article_month
-                )
-                # Check remaining parts for platform info
-                for part in parts[1:]:
-                    ps = part.strip()
-                    ps_low = ps.lower()
-                    if not platforms and (
-                        "también" in ps_low
-                        or any(
-                            p in ps_low
-                            for p in ["pc", "ps4", "ps5", "xbox", "switch"]
-                        )
-                    ):
-                        platforms = re.sub(
-                            r"^también\s+(se publica|disponible)\s+en:?\s*",
-                            "",
-                            ps,
-                            flags=re.IGNORECASE,
-                        )
-            elif low.startswith("disponible en:"):
-                raw_plat = line_s.split(":", 1)[1].strip()
-                raw_plat = re.sub(r"\s*\(\s*$", "", raw_plat)
-                raw_plat = re.sub(
-                    r"\s*\(?ver en [^)]*\)?\s*$", "", raw_plat, flags=re.IGNORECASE
-                )
-                platforms = raw_plat
-            else:
-                if len(line_s) > 30:
-                    commentary_lines.append(line_s)
-
-        # Extract Steam URL from links in the block
-        for el in block_elements:
-            for a in el.find_all("a") if hasattr(el, "find_all") else []:
-                href = a.get("href", "")
-                if "store.steampowered.com" in href:
-                    steam_url = href
-                    break
-            if steam_url:
-                break
-
-        if launch_date is None:
+        if meta["launch_date"] is None:
             print(
                 f"  [warn] No date parsed for featured game: {name!r}",
                 file=sys.stderr,
@@ -324,12 +362,12 @@ def parse_featured_games(
 
         games.append(GameLaunch(
             name=name,
-            launch_date=launch_date,
-            platforms=platforms,
-            developer=developer,
-            publisher=publisher,
-            commentary="\n".join(commentary_lines),
-            steam_url=steam_url,
+            launch_date=meta["launch_date"],
+            platforms=meta["platforms"],
+            developer=meta["developer"],
+            publisher=meta["publisher"],
+            commentary=meta["commentary"],
+            steam_url=_find_steam_url(block_elements),
             source_url=source_url,
             featured=True,
         ))
@@ -347,46 +385,49 @@ def parse_list_games(
         for li in ul.find_all("li", recursive=False):
             li_text = li.get_text(strip=True)
             date_match = _DATE_RE.match(li_text)
-            if date_match:
-                current_date = parse_spanish_date(
-                    date_match.group(1), date_match.group(2), year
-                )
-                if current_date and article_month >= 11 and current_date.month <= 2:
-                    current_date = current_date.replace(year=year + 1)
+            if not date_match:
+                continue
+            current_date = parse_spanish_date(
+                date_match.group(1), date_match.group(2), year
+            )
+            if not current_date:
+                continue
+            current_date = _adjust_year_crossing(current_date, year, article_month)
 
-                sub_ul = li.find("ul")
-                if sub_ul and current_date:
-                    for sub_li in sub_ul.find_all("li", recursive=False):
-                        sub_text = sub_li.get_text(strip=True)
-                        link_el = sub_li.find("a")
-                        steam_url = ""
-                        if link_el:
-                            href = link_el.get("href", "")
-                            if "store.steampowered.com" in href:
-                                steam_url = href
-                            game_name = link_el.get_text(strip=True)
-                        else:
-                            paren_idx = sub_text.find("(")
-                            game_name = (
-                                sub_text[:paren_idx].strip()
-                                if paren_idx > 0
-                                else sub_text
-                            )
+            sub_ul = li.find("ul")
+            if not sub_ul:
+                continue
+            for sub_li in sub_ul.find_all("li", recursive=False):
+                sub_text = sub_li.get_text(strip=True)
+                link_el = sub_li.find("a")
+                steam_url = ""
+                if link_el:
+                    href = link_el.get("href", "")
+                    if "store.steampowered.com" in href:
+                        steam_url = href
+                    game_name = link_el.get_text(strip=True)
+                else:
+                    paren_idx = sub_text.find("(")
+                    game_name = (
+                        sub_text[:paren_idx].strip()
+                        if paren_idx > 0
+                        else sub_text
+                    )
 
-                        platforms = ""
-                        paren_match = re.search(r"\(([^)]+)\)", sub_text)
-                        if paren_match:
-                            platforms = paren_match.group(1)
+                platforms = ""
+                paren_match = re.search(r"\(([^)]+)\)", sub_text)
+                if paren_match:
+                    platforms = paren_match.group(1)
 
-                        if game_name:
-                            games.append(GameLaunch(
-                                name=game_name,
-                                launch_date=current_date,
-                                platforms=platforms,
-                                steam_url=steam_url,
-                                source_url=source_url,
-                                featured=False,
-                            ))
+                if game_name:
+                    games.append(GameLaunch(
+                        name=game_name,
+                        launch_date=current_date,
+                        platforms=platforms,
+                        steam_url=steam_url,
+                        source_url=source_url,
+                        featured=False,
+                    ))
     return games
 
 
@@ -479,11 +520,19 @@ def main():
     )
 
     new_games: list[GameLaunch] = []
+    empty_articles: list[str] = []
     for i, article in enumerate(new_articles, 1):
         print(f"  [{i}/{len(new_articles)}] {article['link']}", file=sys.stderr)
         games = parse_article(article)
         new_games.extend(games)
         processed_ids.add(article["id"])
+
+        if not games:
+            empty_articles.append(article["link"])
+            print(
+                f"  [warn] 0 games parsed from: {article['link']}",
+                file=sys.stderr,
+            )
 
         if args.verbose:
             for g in games:
@@ -504,6 +553,14 @@ def main():
         f"({len(new_games)} parsed, dupes skipped).",
         file=sys.stderr,
     )
+
+    if empty_articles:
+        print(
+            f"[error] {len(empty_articles)} article(s) yielded 0 games — "
+            "possible HTML format change.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

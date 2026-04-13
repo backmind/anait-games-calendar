@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   update:
@@ -23,7 +24,10 @@ jobs:
         run: uv sync --frozen
 
       - name: Run scraper
-        run: uv run python anait_lanzamientos.py --verbose
+        id: scraper
+        run: |
+          uv run python anait_lanzamientos.py --verbose 2>&1 | tee scraper.log
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Commit and push if changed
         run: |
@@ -32,3 +36,23 @@ jobs:
           git add anait_lanzamientos.ics anait_state.json
           git diff --staged --quiet || git commit -m "cal: update $(date -u +%Y-%m-%d)"
           git push
+
+      - name: Open issue on parse failure
+        if: steps.scraper.outputs.exit_code != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          LOG_CONTENT=$(cat scraper.log)
+          gh issue create \
+            --title "Parser alert: article(s) with 0 games detected" \
+            --body "The scraper detected article(s) that yielded **0 games**.
+          This likely means the HTML format on AnaitGames has changed.
+
+          **Scraper log:**
+          \`\`\`
+          ${LOG_CONTENT}
+          \`\`\`
+
+          Check the [workflow run](${RUN_URL}) for details." \
+            --label "bug"
