@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 import tempfile
 from datetime import date
 
@@ -9,6 +10,7 @@ import pytest
 from bs4 import BeautifulSoup
 from icalendar import Calendar
 
+import anait_lanzamientos
 from anait_lanzamientos import (
     GameLaunch,
     _adjust_year_crossing,
@@ -18,6 +20,7 @@ from anait_lanzamientos import (
     get_existing_uids,
     load_existing_calendar,
     load_state,
+    main,
     merge_events,
     parse_article,
     parse_featured_games,
@@ -383,3 +386,67 @@ class TestLoadExistingCalendar:
             f.write(b"NOT VALID ICS DATA {{{")
         cal = load_existing_calendar(path)
         assert cal.get("prodid") is not None
+
+
+# ── main: API failure detection ────────────────────────────────────────
+
+
+class TestMainApiFailure:
+    """main() must fail loudly when the API yields nothing usable.
+
+    A silent 'No new articles' on an empty API response would leave the
+    repo without commits, and GitHub disables scheduled workflows after
+    60 days without activity.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _paths(self, tmp_path, monkeypatch):
+        self.state_path = tmp_path / "state.json"
+        self.ics_path = tmp_path / "out.ics"
+        # Non-empty state so main() takes the incremental path.
+        save_state(str(self.state_path), {"processed_ids": [1], "last_run": None})
+        monkeypatch.setattr(
+            sys, "argv",
+            ["anait_lanzamientos.py",
+             "--state", str(self.state_path),
+             "--output", str(self.ics_path)],
+        )
+
+    def test_exits_1_when_api_returns_no_articles(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            anait_lanzamientos, "fetch_articles_from_api", lambda max_pages: []
+        )
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 1
+        assert "[error]" in capsys.readouterr().err
+        assert not self.ics_path.exists()
+
+    def test_exits_1_when_no_article_matches_weekly_url_pattern(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(
+            anait_lanzamientos, "fetch_articles_from_api",
+            lambda max_pages: [
+                {"id": 5, "link": "https://www.anaitgames.com/articulos/x"},
+                {"id": 6, "link": "https://www.anaitgames.com/articulos/y"},
+            ],
+        )
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 1
+        assert "[error]" in capsys.readouterr().err
+        assert not self.ics_path.exists()
+
+    def test_returns_normally_when_all_articles_already_processed(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(
+            anait_lanzamientos, "fetch_articles_from_api",
+            lambda max_pages: [
+                {"id": 1, "link": "https://www.anaitgames.com/noticias/x"},
+            ],
+        )
+        main()  # must not raise
+        assert "No new articles found." in capsys.readouterr().err
+        assert not self.ics_path.exists()

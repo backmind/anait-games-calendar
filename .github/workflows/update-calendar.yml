@@ -9,6 +9,7 @@ on:
 permissions:
   contents: write
   issues: write
+  actions: write
 
 jobs:
   update:
@@ -37,17 +38,27 @@ jobs:
           git diff --staged --quiet || git commit -m "cal: update $(date -u +%Y-%m-%d)"
           git push
 
-      - name: Open issue on parse failure
+      - name: Open issue on scraper failure
         if: steps.scraper.outputs.exit_code != '0'
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # One open alert at a time: the job runs hourly, so a persistent
+          # failure would otherwise open a new issue every hour.
+          OPEN=$(gh issue list --state open --label bug \
+            --search '"Scraper alert" in:title' --json number --jq 'length')
+          if [ "$OPEN" != "0" ]; then
+            echo "An open scraper alert already exists; not opening another."
+            exit 0
+          fi
           LOG_CONTENT=$(cat scraper.log)
           gh issue create \
-            --title "Parser alert: article(s) with 0 games detected" \
-            --body "The scraper detected article(s) that yielded **0 games**.
-          This likely means the HTML format on AnaitGames has changed.
+            --title "Scraper alert: run failed" \
+            --body "The scraper exited with an error. Look for the \`[error]\` line in the log:
+
+          - **0 games parsed** from an article: the HTML format on AnaitGames has probably changed.
+          - **API returned no articles** or **no article matched the weekly URL pattern**: the WordPress endpoint is down, or the tag ID / URL structure changed. While this persists the calendar gets no commits, and GitHub disables scheduled workflows after 60 days without repository activity.
 
           **Scraper log:**
           \`\`\`
@@ -56,3 +67,14 @@ jobs:
 
           Check the [workflow run](${RUN_URL}) for details." \
             --label "bug"
+
+      # GitHub disables cron-triggered workflows in public repos after 60 days
+      # without repository activity. Normally the weekly calendar commit resets
+      # that counter, but if AnaitGames stops publishing (or the API dies) the
+      # commits stop. Re-enabling the workflow on every run is the same trick
+      # keepalive-workflow uses, and it does not need dummy commits.
+      - name: Keep scheduled workflow alive
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow enable update-calendar.yml

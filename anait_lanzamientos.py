@@ -509,6 +509,24 @@ def main():
     if skipped:
         print(f"Skipped {skipped} non-weekly article(s).", file=sys.stderr)
 
+    # Fail loudly if the API yields nothing usable at all. This is NOT the
+    # routine hourly case where the API returns the usual articles and all
+    # of them are already in the state (handled below, exits 0). It only
+    # triggers when the API returns zero articles or none of them looks
+    # weekly, i.e. the endpoint, the tag ID or the URL structure broke.
+    # Left silent, that would stop the calendar commits and GitHub would
+    # disable the scheduled workflow after 60 days without activity.
+    if not weekly_articles:
+        if not all_articles:
+            reason = "API returned no articles (endpoint down or tag ID changed)"
+        else:
+            reason = (
+                f"none of the {len(all_articles)} article(s) matched the "
+                "weekly URL pattern (/noticias/); URL structure may have changed"
+            )
+        print(f"[error] {reason}.", file=sys.stderr)
+        sys.exit(1)
+
     new_articles = [a for a in weekly_articles if a["id"] not in processed_ids]
 
     if not new_articles:
